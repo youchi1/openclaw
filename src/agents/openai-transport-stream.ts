@@ -19,6 +19,7 @@ import type {
   ResponseInput,
   ResponseInputMessageContentList,
 } from "openai/resources/responses/responses.js";
+import { sha256HexPrefix } from "../logging/redact-identifier.js";
 import type { ProviderRuntimeModel } from "../plugins/provider-runtime-model.types.js";
 import { resolveProviderTransportTurnStateWithPlugin } from "../plugins/provider-runtime.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./copilot-dynamic-headers.js";
@@ -766,7 +767,15 @@ export function buildOpenAIResponsesParams(
     model: model.id,
     input: messages,
     stream: true,
-    prompt_cache_key: cacheRetention === "none" ? undefined : options?.sessionId,
+    prompt_cache_key:
+      cacheRetention === "none" || !options?.sessionId
+        ? undefined
+        : // Include a short hash of the system prompt so the cache key changes
+          // when the system prompt changes (e.g. skills added/removed mid-session).
+          // Without this, OpenAI serves the cached prefix with the old system prompt.
+          context.systemPrompt
+          ? `${options.sessionId}:${sha256HexPrefix(context.systemPrompt)}`
+          : options.sessionId,
     prompt_cache_retention: getPromptCacheRetention(model.baseUrl, cacheRetention),
     ...(metadata ? { metadata } : {}),
   };
