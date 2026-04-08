@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   buildWorkspaceSkillSnapshotMock,
+  bumpSkillsSnapshotVersionMock,
   ensureSkillsWatcherMock,
   getSkillsSnapshotVersionMock,
   shouldRefreshSnapshotForVersionMock,
@@ -11,6 +12,7 @@ const {
   resolveAgentIdFromSessionKeyMock,
 } = vi.hoisted(() => ({
   buildWorkspaceSkillSnapshotMock: vi.fn(() => ({ prompt: "", skills: [], resolvedSkills: [] })),
+  bumpSkillsSnapshotVersionMock: vi.fn(() => 1),
   ensureSkillsWatcherMock: vi.fn(),
   getSkillsSnapshotVersionMock: vi.fn(() => 0),
   shouldRefreshSnapshotForVersionMock: vi.fn(() => false),
@@ -35,6 +37,10 @@ vi.mock("../../agents/skills.js", () => ({
 
 vi.mock("../../agents/skills/refresh.js", () => ({
   ensureSkillsWatcher: ensureSkillsWatcherMock,
+}));
+
+vi.mock("../../agents/skills/refresh-state.js", () => ({
+  bumpSkillsSnapshotVersion: bumpSkillsSnapshotVersionMock,
   getSkillsSnapshotVersion: getSkillsSnapshotVersionMock,
   shouldRefreshSnapshotForVersion: shouldRefreshSnapshotForVersionMock,
 }));
@@ -75,6 +81,79 @@ describe("ensureSkillSnapshot", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it("bumps version and rebuilds snapshot when version is 0 and no cached snapshot exists", async () => {
+    vi.stubEnv("OPENCLAW_TEST_FAST", "0");
+    getSkillsSnapshotVersionMock.mockReturnValue(0);
+    bumpSkillsSnapshotVersionMock.mockReturnValue(1);
+    // After bumping, shouldRefreshSnapshotForVersion(undefined, 1) should return true
+    shouldRefreshSnapshotForVersionMock.mockReturnValue(true);
+    const freshSnapshot = { prompt: "fresh", skills: [], resolvedSkills: [], version: 1 };
+    buildWorkspaceSkillSnapshotMock.mockReturnValue(freshSnapshot);
+
+    const sessionStore = {} as Record<string, never>;
+    const result = await ensureSkillSnapshot({
+      sessionKey: "main",
+      isFirstTurnInSession: true,
+      workspaceDir: "/tmp/workspace",
+      cfg: {},
+      sessionStore,
+      storePath: undefined,
+      sessionId: "test-session",
+    });
+
+    expect(bumpSkillsSnapshotVersionMock).toHaveBeenCalledWith({
+      workspaceDir: "/tmp/workspace",
+      reason: "manual",
+    });
+    expect(buildWorkspaceSkillSnapshotMock).toHaveBeenCalled();
+    expect(result.skillsSnapshot).toBe(freshSnapshot);
+  });
+
+  it("does not bump version when snapshot version is already non-zero", async () => {
+    vi.stubEnv("OPENCLAW_TEST_FAST", "0");
+    getSkillsSnapshotVersionMock.mockReturnValue(42);
+    shouldRefreshSnapshotForVersionMock.mockReturnValue(false);
+
+    await ensureSkillSnapshot({
+      sessionKey: "main",
+      isFirstTurnInSession: false,
+      workspaceDir: "/tmp/workspace",
+      cfg: {},
+      sessionEntry: {
+        sessionId: "s1",
+        updatedAt: Date.now(),
+        skillsSnapshot: { prompt: "cached", skills: [], resolvedSkills: [], version: 42 },
+      },
+    });
+
+    expect(bumpSkillsSnapshotVersionMock).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds snapshot when watcher bumps version mid-session", async () => {
+    vi.stubEnv("OPENCLAW_TEST_FAST", "0");
+    // Watcher bumped version to 100, cached snapshot has version 50
+    getSkillsSnapshotVersionMock.mockReturnValue(100);
+    shouldRefreshSnapshotForVersionMock.mockReturnValue(true);
+    const updatedSnapshot = { prompt: "updated", skills: [], resolvedSkills: [], version: 100 };
+    buildWorkspaceSkillSnapshotMock.mockReturnValue(updatedSnapshot);
+
+    const result = await ensureSkillSnapshot({
+      sessionKey: "main",
+      isFirstTurnInSession: false,
+      workspaceDir: "/tmp/workspace",
+      cfg: {},
+      sessionEntry: {
+        sessionId: "s1",
+        updatedAt: Date.now(),
+        skillsSnapshot: { prompt: "old", skills: [], resolvedSkills: [], version: 50 },
+      },
+    });
+
+    expect(bumpSkillsSnapshotVersionMock).not.toHaveBeenCalled();
+    expect(buildWorkspaceSkillSnapshotMock).toHaveBeenCalled();
+    expect(result.skillsSnapshot).toBe(updatedSnapshot);
   });
 
   it("uses config-aware session agent resolution for legacy session keys", async () => {

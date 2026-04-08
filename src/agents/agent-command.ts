@@ -69,6 +69,11 @@ import {
 } from "./model-selection.js";
 import { classifyEmbeddedPiRunResultForModelFallback } from "./pi-embedded-runner/result-fallback-classifier.js";
 import { resolveProviderIdForAuth } from "./provider-auth-aliases.js";
+// HC-001: ensureSkillsWatcher is the only skills helper imported eagerly. The
+// snapshot helpers (getSkillsSnapshotVersion / bumpSkillsSnapshotVersion /
+// shouldRefreshSnapshotForVersion) are loaded via loadSkillsRefreshStateRuntime
+// to match upstream's lazy-runtime pattern.
+import { ensureSkillsWatcher } from "./skills/refresh.js";
 import { hydrateResolvedSkillsAsync } from "./skills/snapshot-hydration.js";
 import { normalizeSpawnedRunMetadata } from "./spawned-context.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
@@ -627,11 +632,27 @@ async function agentCommandInternal(
       });
     }
 
-    const [{ getSkillsSnapshotVersion, shouldRefreshSnapshotForVersion }, { matchesSkillFilter }] =
-      await Promise.all([loadSkillsRefreshStateRuntime(), loadSkillsFilterRuntime()]);
-    const skillsSnapshotVersion = getSkillsSnapshotVersion(workspaceDir);
-    const skillFilter = resolveAgentSkillsFilter(cfg, sessionAgentId);
+    // HC-001 part 1: ensure the skills file watcher is armed for this workspace.
+    // Without this, the watcher only starts on the auto-reply path; cron and
+    // direct agent runs would never get a version bump when SKILL.md files
+    // change on disk.
+    ensureSkillsWatcher({ workspaceDir, config: cfg });
+    const [
+      { getSkillsSnapshotVersion, bumpSkillsSnapshotVersion, shouldRefreshSnapshotForVersion },
+      { matchesSkillFilter },
+    ] = await Promise.all([loadSkillsRefreshStateRuntime(), loadSkillsFilterRuntime()]);
+    // HC-001 part 2: handle the version-0 cold-start case. If skills were
+    // installed while OpenClaw wasn't running, the watcher never fired and the
+    // version stayed at 0. Bump it once so the snapshot rebuilds from disk.
+    let skillsSnapshotVersion = getSkillsSnapshotVersion(workspaceDir);
     const currentSkillsSnapshot = sessionEntry?.skillsSnapshot;
+    if (
+      skillsSnapshotVersion === 0 &&
+      (!currentSkillsSnapshot || currentSkillsSnapshot.version === 0)
+    ) {
+      skillsSnapshotVersion = bumpSkillsSnapshotVersion({ workspaceDir, reason: "manual" });
+    }
+    const skillFilter = resolveAgentSkillsFilter(cfg, sessionAgentId);
     const shouldRefreshSkillsSnapshot =
       !currentSkillsSnapshot ||
       shouldRefreshSnapshotForVersion(currentSkillsSnapshot.version, skillsSnapshotVersion) ||

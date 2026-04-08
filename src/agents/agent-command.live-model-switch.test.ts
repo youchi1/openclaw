@@ -431,7 +431,12 @@ vi.mock("./skills/filter.js", () => ({
 
 vi.mock("./skills/refresh-state.js", () => ({
   getSkillsSnapshotVersion: () => 0,
+  bumpSkillsSnapshotVersion: () => 1,
   shouldRefreshSnapshotForVersion: () => false,
+}));
+
+vi.mock("./skills/refresh.js", () => ({
+  ensureSkillsWatcher: () => {},
 }));
 
 vi.mock("./spawned-context.js", () => ({

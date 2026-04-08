@@ -6,6 +6,9 @@ import { canExecRequestNode } from "../../agents/exec-defaults.js";
 import { buildWorkspaceSkillSnapshot } from "../../agents/skills.js";
 import { matchesSkillFilter } from "../../agents/skills/filter.js";
 import {
+  // HC-001: bumpSkillsSnapshotVersion is needed for the version-0 cold-start
+  // case below. ensureSkillsWatcher is already imported separately below.
+  bumpSkillsSnapshotVersion,
   getSkillsSnapshotVersion,
   shouldRefreshSnapshotForVersion,
 } from "../../agents/skills/refresh-state.js";
@@ -154,9 +157,15 @@ export async function ensureSkillSnapshot(params: {
       agentId: sessionAgentId,
     }),
   });
-  const snapshotVersion = getSkillsSnapshotVersion(workspaceDir);
+  let snapshotVersion = getSkillsSnapshotVersion(workspaceDir);
   const existingSnapshot = nextEntry?.skillsSnapshot;
   ensureSkillsWatcher({ workspaceDir, config: cfg });
+  // When snapshotVersion is 0, skills may have been installed while OpenClaw
+  // wasn't running (watcher never fired). Bump the version so the new snapshot
+  // gets a non-zero version and won't trigger another rebuild on the next turn.
+  if (snapshotVersion === 0 && (!existingSnapshot || existingSnapshot.version === 0)) {
+    snapshotVersion = bumpSkillsSnapshotVersion({ workspaceDir, reason: "manual" });
+  }
   const shouldRefreshSnapshot =
     shouldRefreshSnapshotForVersion(existingSnapshot?.version, snapshotVersion) ||
     !matchesSkillFilter(existingSnapshot?.skillFilter, skillFilter);

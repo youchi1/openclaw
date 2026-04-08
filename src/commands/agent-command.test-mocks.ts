@@ -197,6 +197,9 @@ vi.mock("../agents/skills.js", () => ({
 
 vi.mock("../agents/skills/refresh.js", () => ({
   getSkillsSnapshotVersion: vi.fn(() => 0),
+  ensureSkillsWatcher: vi.fn(),
+  bumpSkillsSnapshotVersion: vi.fn(() => 1),
+  shouldRefreshSnapshotForVersion: vi.fn(() => false),
 }));
 
 vi.mock("../agents/skills/refresh-state.js", () => ({
