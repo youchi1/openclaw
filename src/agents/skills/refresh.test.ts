@@ -30,29 +30,30 @@ describe("ensureSkillsWatcher", () => {
     await refreshModule.resetSkillsRefreshForTest();
   });
 
-  it("ignores node_modules, dist, .git, and Python venvs by default", async () => {
+  it("watches skill root directories with depth limit and ignore patterns", async () => {
     refreshModule.ensureSkillsWatcher({ workspaceDir: "/tmp/workspace" });
 
     expect(watchMock).toHaveBeenCalledTimes(1);
     const firstCall = (
-      watchMock.mock.calls as unknown as Array<[string[], { ignored?: unknown }]>
+      watchMock.mock.calls as unknown as Array<[string[], { ignored?: unknown; depth?: number }]>
     )[0];
     const targets = firstCall?.[0] ?? [];
     const opts = firstCall?.[1] ?? {};
 
     expect(opts.ignored).toBe(refreshModule.DEFAULT_SKILLS_WATCH_IGNORED);
-    const posix = (p: string) => p.replaceAll("\\", "/");
+    // Chokidar v5 glob patterns don't detect new subdirectories, so we watch
+    // the parent directories directly with depth: 1 and filter for SKILL.md
+    // in the event handler.
+    expect(opts.depth).toBe(1);
     expect(targets).toEqual(
       expect.arrayContaining([
-        posix(path.join("/tmp/workspace", "skills", "SKILL.md")),
-        posix(path.join("/tmp/workspace", "skills", "*", "SKILL.md")),
-        posix(path.join("/tmp/workspace", ".agents", "skills", "SKILL.md")),
-        posix(path.join("/tmp/workspace", ".agents", "skills", "*", "SKILL.md")),
-        posix(path.join(os.homedir(), ".agents", "skills", "SKILL.md")),
-        posix(path.join(os.homedir(), ".agents", "skills", "*", "SKILL.md")),
+        path.resolve("/tmp/workspace", "skills"),
+        path.resolve("/tmp/workspace", ".agents", "skills"),
+        path.resolve(os.homedir(), ".agents", "skills"),
       ]),
     );
-    expect(targets.every((target) => target.includes("SKILL.md"))).toBe(true);
+    // Targets should be directories, not glob patterns
+    expect(targets.every((target: string) => !target.includes("*"))).toBe(true);
     const ignored = refreshModule.DEFAULT_SKILLS_WATCH_IGNORED;
 
     // Node/JS paths
