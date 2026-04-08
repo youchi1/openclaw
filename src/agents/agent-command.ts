@@ -84,7 +84,12 @@ import {
 } from "./model-selection.js";
 import { buildWorkspaceSkillSnapshot } from "./skills.js";
 import { matchesSkillFilter } from "./skills/filter.js";
-import { getSkillsSnapshotVersion, shouldRefreshSnapshotForVersion } from "./skills/refresh.js";
+import {
+  bumpSkillsSnapshotVersion,
+  ensureSkillsWatcher,
+  getSkillsSnapshotVersion,
+  shouldRefreshSnapshotForVersion,
+} from "./skills/refresh.js";
 import { normalizeSpawnedRunMetadata } from "./spawned-context.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 import { ensureAgentWorkspace } from "./workspace.js";
@@ -514,9 +519,18 @@ async function agentCommandInternal(
       });
     }
 
-    const skillsSnapshotVersion = getSkillsSnapshotVersion(workspaceDir);
-    const skillFilter = resolveAgentSkillsFilter(cfg, sessionAgentId);
+    ensureSkillsWatcher({ workspaceDir, config: cfg });
+    let skillsSnapshotVersion = getSkillsSnapshotVersion(workspaceDir);
+    // When version is 0, skills may have changed while OpenClaw wasn't running
+    // (watcher never fired). Bump the version so the snapshot rebuilds.
     const currentSkillsSnapshot = sessionEntry?.skillsSnapshot;
+    if (
+      skillsSnapshotVersion === 0 &&
+      (!currentSkillsSnapshot || currentSkillsSnapshot.version === 0)
+    ) {
+      skillsSnapshotVersion = bumpSkillsSnapshotVersion({ workspaceDir, reason: "manual" });
+    }
+    const skillFilter = resolveAgentSkillsFilter(cfg, sessionAgentId);
     const shouldRefreshSkillsSnapshot =
       !currentSkillsSnapshot ||
       shouldRefreshSnapshotForVersion(currentSkillsSnapshot.version, skillsSnapshotVersion) ||
