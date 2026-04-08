@@ -1,9 +1,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceBootstrapFile } from "./workspace.js";
 
+const statSyncMock = vi.fn();
+vi.mock("node:fs", () => ({ default: { statSync: statSyncMock } }));
+
 vi.mock("./workspace.js", () => ({
   loadWorkspaceBootstrapFiles: vi.fn(),
 }));
+
+let fakeMtimeMs = 1000;
 
 function makeFile(name: string, content: string): WorkspaceBootstrapFile {
   return {
@@ -31,6 +36,8 @@ describe("getOrLoadBootstrapFiles", () => {
   beforeEach(() => {
     clearAllBootstrapSnapshots();
     mockLoad().mockResolvedValue(files);
+    fakeMtimeMs = 1000;
+    statSyncMock.mockImplementation(() => ({ mtimeMs: fakeMtimeMs }));
   });
 
   afterEach(() => {
@@ -54,6 +61,46 @@ describe("getOrLoadBootstrapFiles", () => {
 
     expect(result).toBe(files);
     expect(mockLoad()).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads when file mtime changes", async () => {
+    await getOrLoadBootstrapFiles({ workspaceDir: "/ws", sessionKey: "session-1" });
+
+    // Simulate file edit — mtime advances.
+    fakeMtimeMs = 2000;
+    statSyncMock.mockImplementation(() => ({ mtimeMs: fakeMtimeMs }));
+
+    await getOrLoadBootstrapFiles({ workspaceDir: "/ws", sessionKey: "session-1" });
+    expect(mockLoad()).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloads when a previously-missing file appears", async () => {
+    const filesWithMissing = [
+      makeFile("AGENTS.md", "# Agent"),
+      {
+        name: "SOUL.md" as WorkspaceBootstrapFile["name"],
+        path: "/ws/SOUL.md",
+        content: undefined,
+        missing: true,
+      },
+    ];
+    mockLoad().mockResolvedValue(filesWithMissing);
+    // SOUL.md doesn't exist yet — statSync throws for it.
+    statSyncMock.mockImplementation((p: string) => {
+      if (p === "/ws/SOUL.md") {
+        throw new Error("ENOENT");
+      }
+      return { mtimeMs: fakeMtimeMs };
+    });
+
+    await getOrLoadBootstrapFiles({ workspaceDir: "/ws", sessionKey: "session-1" });
+
+    // SOUL.md now exists.
+    statSyncMock.mockImplementation(() => ({ mtimeMs: fakeMtimeMs }));
+    mockLoad().mockResolvedValue([makeFile("AGENTS.md", "# Agent"), makeFile("SOUL.md", "# Soul")]);
+
+    await getOrLoadBootstrapFiles({ workspaceDir: "/ws", sessionKey: "session-1" });
+    expect(mockLoad()).toHaveBeenCalledTimes(2);
   });
 
   it("different session keys get independent caches", async () => {
@@ -86,6 +133,8 @@ describe("clearBootstrapSnapshot", () => {
   beforeEach(() => {
     clearAllBootstrapSnapshots();
     mockLoad().mockResolvedValue([makeFile("AGENTS.md", "content")]);
+    fakeMtimeMs = 1000;
+    statSyncMock.mockImplementation(() => ({ mtimeMs: fakeMtimeMs }));
   });
 
   afterEach(() => {
