@@ -72,24 +72,23 @@ function resolveWatchPaths(workspaceDir: string, config?: OpenClawConfig): strin
   return paths;
 }
 
-function toWatchGlobRoot(raw: string): string {
-  // Chokidar treats globs as POSIX-ish patterns. Normalize Windows separators
-  // so `*` works consistently across platforms.
-  return raw.replaceAll("\\", "/").replace(/\/+$/, "");
-}
-
 function resolveWatchTargets(workspaceDir: string, config?: OpenClawConfig): string[] {
-  // Skills are defined by SKILL.md; watch only those files to avoid traversing
-  // or watching unrelated large trees (e.g. datasets) that can exhaust FDs.
+  // Watch skill root directories directly instead of glob patterns.
+  // Chokidar v5 does not detect new subdirectories matching a glob pattern,
+  // so we watch the parent dirs with depth: 1 and filter for SKILL.md in the
+  // event handler. This ensures add/unlink of skills in new subdirectories
+  // are detected reliably.
   const targets = new Set<string>();
   for (const root of resolveWatchPaths(workspaceDir, config)) {
-    const globRoot = toWatchGlobRoot(root);
-    // Some configs point directly at a skill folder.
-    targets.add(`${globRoot}/SKILL.md`);
-    // Standard layout: <skillsRoot>/<skillName>/SKILL.md
-    targets.add(`${globRoot}/*/SKILL.md`);
+    targets.add(path.resolve(root));
   }
   return Array.from(targets).toSorted();
+}
+
+const SKILL_MD_BASENAME = "SKILL.md";
+
+function isSkillMdEvent(changedPath: string): boolean {
+  return path.basename(changedPath) === SKILL_MD_BASENAME;
 }
 
 export function ensureSkillsWatcher(params: { workspaceDir: string; config?: OpenClawConfig }) {
@@ -131,12 +130,10 @@ export function ensureSkillsWatcher(params: { workspaceDir: string; config?: Ope
 
   const watcher = chokidar.watch(watchTargets, {
     ignoreInitial: true,
-    awaitWriteFinish: {
-      stabilityThreshold: debounceMs,
-      pollInterval: 100,
-    },
+    // depth: 1 limits to <skillsRoot>/<skillName>/SKILL.md — avoids traversing
+    // deep trees while still detecting new skill subdirectories.
+    depth: 1,
     // Avoid FD exhaustion on macOS when a workspace contains huge trees.
-    // This watcher only needs to react to SKILL.md changes.
     ignored: DEFAULT_SKILLS_WATCH_IGNORED,
   });
 
@@ -159,9 +156,11 @@ export function ensureSkillsWatcher(params: { workspaceDir: string; config?: Ope
     }, debounceMs);
   };
 
-  watcher.on("add", (p) => schedule(p));
-  watcher.on("change", (p) => schedule(p));
-  watcher.on("unlink", (p) => schedule(p));
+  // Filter events to only react to SKILL.md changes — other files in skill
+  // directories (data, scripts, etc.) should not trigger snapshot rebuilds.
+  watcher.on("add", (p) => isSkillMdEvent(p) && schedule(p));
+  watcher.on("change", (p) => isSkillMdEvent(p) && schedule(p));
+  watcher.on("unlink", (p) => isSkillMdEvent(p) && schedule(p));
   watcher.on("error", (err) => {
     log.warn(`skills watcher error (${workspaceDir}): ${String(err)}`);
   });
