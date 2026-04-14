@@ -8,7 +8,6 @@ import {
   isSilentReplyText,
   SILENT_REPLY_TOKEN,
   startsWithSilentToken,
-  stripLeadingSilentToken,
   stripSilentToken,
 } from "../tokens.js";
 import type { ReplyPayload } from "../types.js";
@@ -67,9 +66,17 @@ export function normalizeReplyPayload(
   if (text && !isSilentReplyText(text, silentToken)) {
     const hasLeadingSilentToken = startsWithSilentToken(text, silentToken);
     if (hasLeadingSilentToken) {
-      text = stripLeadingSilentToken(text, silentToken);
+      // When NO_REPLY is glued directly to following text (e.g.
+      // "NO_REPLY출장샵assistant..."), the model intended silence but leaked
+      // garbage from context pollution.  Drop the corrupted text; media
+      // attachments are still delivered if present.  (#25592, #64976)
+      if (!hasContent("")) {
+        opts.onSkip?.("silent");
+        return null;
+      }
+      text = "";
     }
-    if (hasLeadingSilentToken || text.includes(silentToken)) {
+    if (text && text.includes(silentToken)) {
       text = stripSilentToken(text, silentToken);
       if (!hasContent(text)) {
         opts.onSkip?.("silent");
