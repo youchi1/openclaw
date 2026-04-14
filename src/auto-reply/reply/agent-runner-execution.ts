@@ -68,7 +68,6 @@ import {
   isSilentReplyText,
   SILENT_REPLY_TOKEN,
   startsWithSilentToken,
-  stripLeadingSilentToken,
 } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
@@ -1276,7 +1275,8 @@ export async function runAgentTurnWithFallback(params: {
           return { skip: true };
         }
         if (text && startsWithSilentToken(text, SILENT_REPLY_TOKEN)) {
-          text = stripLeadingSilentToken(text, SILENT_REPLY_TOKEN);
+          // NO_REPLY glued to garbage text → model intended silence. (#25592)
+          return { skip: true };
         }
         if (!text) {
           // Allow media-only payloads (e.g. tool result screenshots) through.

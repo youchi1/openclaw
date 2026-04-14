@@ -462,15 +462,15 @@ describe("createAcpVisibleTextAccumulator", () => {
     });
   });
 
-  it("preserves punctuation-start text that begins with NO_REPLY-like content", () => {
+  it("strips leading NO_REPLY from punctuation-separated content (#25592)", () => {
     const acc = createAcpVisibleTextAccumulator();
 
     expect(acc.consume("NO_REPLY: explanation")).toEqual({
-      text: "NO_REPLY: explanation",
-      delta: "NO_REPLY: explanation",
+      text: ": explanation",
+      delta: ": explanation",
     });
 
-    expect(acc.finalize()).toBe("NO_REPLY: explanation");
+    expect(acc.finalize()).toBe(": explanation");
   });
 
   it("buffers chunked NO_REPLY prefixes before emitting visible text", () => {

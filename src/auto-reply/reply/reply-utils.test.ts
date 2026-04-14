@@ -128,36 +128,44 @@ describe("normalizeReplyPayload", () => {
     expect(result!.text).not.toContain("NO_REPLY");
   });
 
-  it("strips glued leading NO_REPLY text without leaking the token", () => {
+  it("suppresses NO_REPLY glued to symbols as garbage from context pollution (#25592)", () => {
     const result = normalizeReplyPayload({
-      text: "NO_REPLYThe user is saying hello",
+      text: "NO_REPLY♀♀♀♀ to=function",
     });
-    expect(result).not.toBeNull();
-    expect(result!.text).toBe("The user is saying hello");
+    expect(result).toBeNull();
   });
 
-  it("strips glued leading NO_REPLY text case-insensitively", () => {
+  it("suppresses NO_REPLY glued to CJK garbage (#25592)", () => {
+    const result = normalizeReplyPayload({
+      text: "NO_REPLY출장샵assistant to=functions.message",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("suppresses NO_REPLY glued to combining marks (#25592)", () => {
+    const result = normalizeReplyPayload({
+      text: "NO_REPLYైంది to=",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("suppresses glued leading NO_REPLY case-insensitively (#25592)", () => {
     const result = normalizeReplyPayload({
       text: "no_replyThe user is saying hello",
     });
-    expect(result).not.toBeNull();
-    expect(result!.text).toBe("The user is saying hello");
+    expect(result).toBeNull();
   });
 
-  it("keeps NO_REPLY when used as leading substantive text", () => {
-    const result = normalizeReplyPayload({ text: "NO_REPLY -- nope" });
-    expect(result).not.toBeNull();
-    expect(result!.text).toBe("NO_REPLY -- nope");
+  it("suppresses NO_REPLY followed by punctuation-separated text (#25592)", () => {
+    // When a model outputs NO_REPLY it intends silence — text after the token
+    // (whether glued or punctuation-separated) is garbage from context pollution.
+    expect(normalizeReplyPayload({ text: "NO_REPLY -- nope" })).toBeNull();
+    expect(normalizeReplyPayload({ text: "NO_REPLY: explanation" })).toBeNull();
+    expect(normalizeReplyPayload({ text: "NO_REPLY—note" })).toBeNull();
   });
 
-  it("keeps punctuation-start content after a leading NO_REPLY token", () => {
-    const colonResult = normalizeReplyPayload({ text: "NO_REPLY: explanation" });
-    expect(colonResult).not.toBeNull();
-    expect(colonResult!.text).toBe("NO_REPLY: explanation");
-
-    const dashResult = normalizeReplyPayload({ text: "NO_REPLY—note" });
-    expect(dashResult).not.toBeNull();
-    expect(dashResult!.text).toBe("NO_REPLY—note");
+  it("suppresses NO_REPLY space-separated from garbage (#25592)", () => {
+    expect(normalizeReplyPayload({ text: "NO_REPLY 񟿿 to=fun" })).toBeNull();
   });
 
   it("suppresses message when stripping NO_REPLY leaves nothing", () => {
@@ -1082,12 +1090,12 @@ describe("createStreamingDirectiveAccumulator", () => {
     expect(result?.text).toBe("The user is saying hello");
   });
 
-  it("keeps punctuation-start text after a leading NO_REPLY token", () => {
+  it("strips leading NO_REPLY from punctuation-separated content (#25592)", () => {
     const accumulator = createStreamingDirectiveAccumulator();
 
     const result = accumulator.consume("NO_REPLY: explanation");
 
-    expect(result?.text).toBe("NO_REPLY: explanation");
+    expect(result?.text).toBe(": explanation");
   });
 
   it("reassembles MEDIA: directives split between the token and the colon", () => {

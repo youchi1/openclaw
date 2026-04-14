@@ -95,11 +95,12 @@ function getSilentLeadingAttachedRegex(token: string): RegExp {
     return cached;
   }
   const escaped = escapeRegExp(token);
-  // Match one or more leading occurrences of the token where the final token
-  // is glued directly to visible word-start content (for example
-  // `NO_REPLYhello`), without treating punctuation-start text like
-  // `NO_REPLY: explanation` as a silent prefix.
-  const regex = new RegExp(`^\\s*(?:${escaped}\\s+)*${escaped}(?=[\\p{L}\\p{N}])`, "iu");
+  // Match text that starts with the silent token followed by any additional
+  // non-whitespace content.  When a model outputs NO_REPLY it intends silence
+  // — anything after the token is garbage from context pollution, regardless
+  // of whether it is glued (`NO_REPLYhello`) or space-separated
+  // (`NO_REPLY 𜿿 to=fun`).
+  const regex = new RegExp(`^\\s*(?:${escaped}\\s*)+\\S`, "iu");
   silentLeadingAttachedRegexByToken.set(token, regex);
   return regex;
 }
