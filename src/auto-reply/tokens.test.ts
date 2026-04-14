@@ -97,10 +97,15 @@ describe("startsWithSilentToken", () => {
     expect(startsWithSilentToken("no_replyThe user is saying")).toBe(true);
   });
 
-  it("rejects separated substantive prefixes and exact-token-only text", () => {
-    expect(startsWithSilentToken("NO_REPLY -- nope")).toBe(false);
-    expect(startsWithSilentToken("NO_REPLY: explanation")).toBe(false);
-    expect(startsWithSilentToken("NO_REPLY—note")).toBe(false);
+  it("matches NO_REPLY followed by any content (punctuation, space-separated, symbols)", () => {
+    expect(startsWithSilentToken("NO_REPLY -- nope")).toBe(true);
+    expect(startsWithSilentToken("NO_REPLY: explanation")).toBe(true);
+    expect(startsWithSilentToken("NO_REPLY—note")).toBe(true);
+    expect(startsWithSilentToken("NO_REPLY 񟿿 to=fun")).toBe(true);
+    expect(startsWithSilentToken("NO_REPLY♀♀♀♀ to=function")).toBe(true);
+  });
+
+  it("rejects exact-token-only text (handled by isSilentReplyText instead)", () => {
     expect(startsWithSilentToken("NO_REPLY")).toBe(false);
     expect(startsWithSilentToken("  NO_REPLY  ")).toBe(false);
   });
