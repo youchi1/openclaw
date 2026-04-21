@@ -684,10 +684,22 @@ export function handleMessageEnd(
   });
   warnIfAssistantEmittedToolText(ctx, assistantMessage);
 
+  const rawStrippedText = ctx.stripBlockTags(rawVisibleText, { thinking: false, final: false });
+  // Use the fallback text (tool-sent content replacing NO_REPLY) only for the
+  // assistant stream event and transcript — NOT for block reply delivery.
+  // Feeding the tool text into the block reply path causes duplicate Telegram
+  // delivery when the dedup check at message_end races or misses.
   const text = resolveSilentReplyFallbackText({
+    // Upstream strips final-block tags here; preserve that on the fallback path.
+    // HC-006 splits this from the block reply path below (which uses
+    // rawStrippedText) so NO_REPLY can still reach the silent-token guard.
     text: ctx.stripBlockTags(rawVisibleText, { thinking: false, final: false }, { final: true }),
     messagingToolSentTexts: ctx.state.messagingToolSentTexts,
   });
+  // Block reply path uses the original text so NO_REPLY flows through to the
+  // silent-token suppression in reply-delivery.ts instead of being replaced
+  // with already-delivered tool content.
+  const blockReplyText = rawStrippedText;
   const rawThinking =
     ctx.state.includeReasoning || ctx.state.streamReasoning
       ? extractAssistantThinking(assistantMessage) || extractThinkingFromTaggedText(rawText)
@@ -756,7 +768,16 @@ export function handleMessageEnd(
 
   const silentExpectedWithoutSentinel =
     ctx.params.silentExpected && !isSilentReplyText(trimmedText, SILENT_REPLY_TOKEN);
-  const finalAssistantText = silentExpectedWithoutSentinel ? "" : text;
+  // HC-006: feed the raw text (preserving NO_REPLY) into assistantTexts, NOT
+  // the fallback-replaced `text`. The fallback substitutes NO_REPLY with the
+  // last messaging-tool-sent content, which then flows through assistantTexts
+  // → buildEmbeddedRunPayloads → final reply payload. The downstream silent-
+  // token filter can only suppress literal NO_REPLY; if we hand it the
+  // tool's content it slips through and Telegram delivers the message twice
+  // (once via the tool with buttons, once via the final assistant payload
+  // without buttons). Using blockReplyText keeps NO_REPLY intact for the
+  // suppression path while `text` still drives the assistant stream / UI.
+  const finalAssistantText = silentExpectedWithoutSentinel ? "" : blockReplyText;
   const addedDuringMessage = ctx.state.assistantTexts.length > ctx.state.assistantTextBaseline;
   const chunkerHasBuffered = ctx.blockChunker?.hasBuffered() ?? false;
   ctx.finalizeAssistantTexts({
@@ -822,11 +843,11 @@ export function handleMessageEnd(
   if (
     !ctx.params.silentExpected &&
     !suppressDeterministicApprovalOutput &&
-    text &&
+    blockReplyText &&
     onBlockReply &&
     (ctx.state.blockReplyBreak === "message_end" ||
       hasBufferedBlockReply ||
-      text !== ctx.state.lastBlockReplyText)
+      blockReplyText !== ctx.state.lastBlockReplyText)
   ) {
     if (hasBufferedBlockReply && ctx.blockChunker?.hasBuffered()) {
       const flushBlockReplyBufferResult = ctx.flushBlockReplyBuffer({
@@ -846,7 +867,11 @@ export function handleMessageEnd(
       // pendingTail forever and the attachment would be silently dropped
       // on the message_end / blockReplyChunking path.
       emitSplitResultAsBlockReply(ctx.consumeReplyDirectives("", { final: true }));
-    } else if (text !== ctx.state.lastBlockReplyText) {
+      // HC-006: compare blockReplyText (raw stripped text) instead of text
+      // (fallback-replaced text). Using the fallback-replaced text bypasses
+      // reply-delivery.ts silent-token suppression and re-emits content
+      // already sent by the message tool.
+    } else if (blockReplyText !== ctx.state.lastBlockReplyText) {
       // Guard: for text_end channels, if text_end already delivered content
       // (lastBlockReplyText is set), skip this safety send. The text comparison
       // here uses a different stripping pipeline (stripBlockTags with reset state)
@@ -860,7 +885,7 @@ export function handleMessageEnd(
         );
       } else {
         // Check for duplicates before emitting (same logic as emitBlockChunk).
-        const normalizedText = normalizeTextForComparison(text);
+        const normalizedText = normalizeTextForComparison(blockReplyText);
         if (
           isMessagingToolDuplicateNormalized(
             normalizedText,
@@ -868,11 +893,11 @@ export function handleMessageEnd(
           )
         ) {
           ctx.log.debug(
-            `Skipping message_end block reply - already sent via messaging tool: ${text.slice(0, 50)}...`,
+            `Skipping message_end block reply - already sent via messaging tool: ${blockReplyText.slice(0, 50)}...`,
           );
         } else {
-          ctx.state.lastBlockReplyText = text;
-          emitSplitResultAsBlockReply(ctx.consumeReplyDirectives(text, { final: true }));
+          ctx.state.lastBlockReplyText = blockReplyText;
+          emitSplitResultAsBlockReply(ctx.consumeReplyDirectives(blockReplyText, { final: true }));
         }
       }
     }

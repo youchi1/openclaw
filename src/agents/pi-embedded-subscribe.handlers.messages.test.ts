@@ -791,6 +791,91 @@ describe("handleMessageEnd", () => {
     expect(emitBlockReply).not.toHaveBeenCalled();
   });
 
+  it("does not emit block reply with messaging tool text when assistant says NO_REPLY", () => {
+    const emitBlockReply = vi.fn();
+    const consumeReplyDirectives = vi.fn((text: string) => (text ? { text } : null));
+    const toolSentText =
+      "**Reddit**\n\n⭐ **reddit-research-but-free** - no-auth Reddit research tool";
+    const ctx = createMessageEndContext({
+      emitBlockReply,
+      consumeReplyDirectives,
+      state: {
+        blockReplyBreak: "text_end",
+        // Tool already sent this text via message tool
+        messagingToolSentTexts: [toolSentText],
+        messagingToolSentTextsNormalized: [toolSentText.toLowerCase().replace(/\s+/g, " ").trim()],
+        // No streaming happened for this message (lastBlockReplyText is null)
+        lastBlockReplyText: undefined,
+        deltaBuffer: "",
+        blockBuffer: "",
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "NO_REPLY" }],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    // The block reply must NOT deliver the tool's sent text again.
+    // resolveSilentReplyFallbackText replaces NO_REPLY with tool text for the
+    // assistant stream/transcript, but the block reply path must use the
+    // original text so NO_REPLY flows to reply-delivery's silent suppression
+    // instead of re-delivering the tool content.
+    const blockReplyTexts = emitBlockReply.mock.calls.map(
+      (call: [{ text?: string }]) => call[0]?.text,
+    );
+    expect(blockReplyTexts).not.toContain(toolSentText);
+  });
+
+  it("HC-006 amend: finalizeAssistantTexts receives raw NO_REPLY (not fallback tool text)", () => {
+    // Regression for the screenshot bug on cu (2026-05-19): the original
+    // HC-006 fix only covered the block reply path. The `finalAssistantText`
+    // value handed to finalizeAssistantTexts continued to use the fallback-
+    // replaced text, so it flowed through assistantTexts → buildEmbeddedRunPayloads
+    // → final reply payload, where the silent-token filter could not catch it
+    // (because by then the text was the actual tool content, not NO_REPLY).
+    // After this amend, finalizeAssistantTexts must receive the raw NO_REPLY,
+    // so buildEmbeddedRunPayloads' isSilentReplyPayloadText filter drops it.
+    const finalizeAssistantTexts = vi.fn();
+    const consumeReplyDirectives = vi.fn((text: string) => (text ? { text } : null));
+    const toolSentText =
+      "First, I'll ask a few questions about you and your business. " +
+      "This helps your agents write better content, research the right topics, " +
+      "and match your style.\n\nWhat roles fit you best? Tap all that apply, then Done ✅";
+    const ctx = createMessageEndContext({
+      finalizeAssistantTexts,
+      consumeReplyDirectives,
+      state: {
+        blockReplyBreak: "message_end",
+        messagingToolSentTexts: [toolSentText],
+        messagingToolSentTextsNormalized: [
+          toolSentText.toLowerCase().replace(/\s+/g, " ").trim(),
+        ],
+        lastBlockReplyText: undefined,
+        deltaBuffer: "",
+        blockBuffer: "",
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "NO_REPLY" }],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    expect(finalizeAssistantTexts).toHaveBeenCalledTimes(1);
+    const finalizeArg = finalizeAssistantTexts.mock.calls[0][0] as { text?: string };
+    expect(finalizeArg.text).not.toBe(toolSentText);
+    expect(finalizeArg.text).toBe("NO_REPLY");
+  });
+
   it("emits a replacement final assistant event when final_answer appears only at message_end", () => {
     const onAgentEvent = vi.fn();
     const ctx = createMessageEndContext({
