@@ -509,6 +509,56 @@ describe("handleMessageEnd", () => {
     expect(emitBlockReply).not.toHaveBeenCalled();
   });
 
+  it("does not emit block reply with messaging tool text when assistant says NO_REPLY", () => {
+    const emitBlockReply = vi.fn();
+    const consumeReplyDirectives = vi.fn((text: string) => (text ? { text } : null));
+    const toolSentText =
+      "**Reddit**\n\n⭐ **reddit-research-but-free** - no-auth Reddit research tool";
+    const ctx = createMessageEndContext({
+      emitBlockReply,
+      consumeReplyDirectives,
+      state: {
+        blockReplyBreak: "text_end",
+        // Tool already sent this text via message tool
+        messagingToolSentTexts: [toolSentText],
+        messagingToolSentTextsNormalized: [toolSentText.toLowerCase().replace(/\s+/g, " ").trim()],
+        // No streaming happened for this message (lastBlockReplyText is null)
+        lastBlockReplyText: undefined,
+        deltaBuffer: "",
+        blockBuffer: "",
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "NO_REPLY" }],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    // The block reply must NOT deliver the tool's sent text again.
+    // resolveSilentReplyFallbackText replaces NO_REPLY with tool text for the
+    // assistant stream/transcript, but the block reply path must use the
+    // original text so NO_REPLY flows to reply-delivery's silent suppression
+    // instead of re-delivering the tool content.
+    const blockReplyTexts = emitBlockReply.mock.calls.map(
+      (call: unknown[]) => (call[0] as { text?: string })?.text,
+    );
+    expect(blockReplyTexts).not.toContain(toolSentText);
+
+    // finalizeAssistantTexts must also NOT receive the tool text — otherwise
+    // it enters assistantTexts → buildEmbeddedRunPayloads → final reply
+    // payloads → duplicate Telegram delivery.
+    const finalizedTexts = (ctx.finalizeAssistantTexts as ReturnType<typeof vi.fn>).mock.calls.map(
+      (call: unknown[]) => (call[0] as { text: string })?.text,
+    );
+    for (const finalized of finalizedTexts) {
+      expect(finalized).not.toBe(toolSentText);
+    }
+  });
+
   it("emits a replacement final assistant event when final_answer appears only at message_end", () => {
     const onAgentEvent = vi.fn();
     const ctx = createMessageEndContext({
