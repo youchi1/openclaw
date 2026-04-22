@@ -1,4 +1,4 @@
-import type { Message, ReactionTypeEmoji } from "@grammyjs/types";
+import type { InlineKeyboardMarkup, Message, ReactionTypeEmoji } from "@grammyjs/types";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveChannelConfigWrites } from "openclaw/plugin-sdk/channel-config-helpers";
 import { shouldDebounceTextInbound } from "openclaw/plugin-sdk/channel-inbound";
@@ -109,6 +109,16 @@ import {
   resolveModelSelection,
   type ProviderInfo,
 } from "./model-buttons.js";
+import {
+  buildMultiselectResultMessage,
+  buildUpdatedKeyboard,
+  drainSelections,
+  findClickedButtonText,
+  hasMultiselectDoneButton,
+  isDoneButtonClick,
+  restoreSelections,
+  toggleSelection,
+} from "./multiselect-accumulator.js";
 import { buildInlineKeyboard } from "./send.js";
 
 export const registerTelegramHandlers = ({
@@ -1383,6 +1393,88 @@ export const registerTelegramHandlers = ({
       });
       if (!senderAuthorization.allowed) {
         return;
+      }
+
+      // ── Multi-select button accumulation (HC-007) ──────────────────────
+      // When a message has a "Done ✅" button, accumulate non-Done clicks
+      // locally instead of dispatching each one as a separate agent turn.
+      // Only dispatch once when "Done ✅" is clicked, with all selections
+      // merged into a single message.
+      const callbackReplyMarkup = (callbackMessage as { reply_markup?: InlineKeyboardMarkup })
+        .reply_markup;
+      if (callbackReplyMarkup && hasMultiselectDoneButton(callbackReplyMarkup)) {
+        const clickedText = findClickedButtonText(callbackReplyMarkup, data);
+        if (clickedText != null) {
+          if (!isDoneButtonClick(clickedText)) {
+            // Non-Done click: toggle selection and update button visuals
+            const cleanText = clickedText.replace(/^✅\s*/, "");
+            const selections = toggleSelection(chatId, callbackMessage.message_id, {
+              text: cleanText,
+              callbackData: data,
+            });
+            try {
+              const updatedKeyboard = buildUpdatedKeyboard(
+                callbackReplyMarkup.inline_keyboard,
+                selections,
+              );
+              const editReplyMarkupFn = (ctx as { editMessageReplyMarkup?: unknown })
+                .editMessageReplyMarkup;
+              if (typeof editReplyMarkupFn === "function") {
+                await ctx.editMessageReplyMarkup({
+                  reply_markup: { inline_keyboard: updatedKeyboard },
+                });
+              } else {
+                await bot.api.editMessageReplyMarkup(chatId, callbackMessage.message_id, {
+                  reply_markup: { inline_keyboard: updatedKeyboard },
+                });
+              }
+            } catch (editErr) {
+              const errStr = String(editErr);
+              if (!errStr.includes("message is not modified")) {
+                logVerbose(`telegram: multi-select button edit failed: ${errStr}`);
+              }
+            }
+            return;
+          }
+
+          // Done click: drain selections and dispatch as one message.
+          // Do not clear the keyboard. The ✅-annotated rows stay in chat
+          // history, matching the 4.12 HC-007 contract.
+          const selections = drainSelections(chatId, callbackMessage.message_id);
+          if (selections && selections.length > 0) {
+            const mergedText = buildMultiselectResultMessage(selections);
+            const syntheticMessage = buildSyntheticTextMessage({
+              base: withResolvedTelegramForumFlag(callbackMessage, isForum),
+              from: callback.from,
+              text: mergedText,
+            });
+            try {
+              await processMessage(
+                buildSyntheticContext(ctx, syntheticMessage),
+                [],
+                storeAllowFrom,
+                {
+                  forceWasMentioned: true,
+                  messageIdOverride: callback.id,
+                },
+              );
+            } catch (dispatchErr) {
+              // Dispatch failed — restore selections so user can retry
+              restoreSelections(chatId, callbackMessage.message_id, selections);
+              logVerbose(`telegram: multi-select dispatch failed: ${String(dispatchErr)}`);
+              try {
+                await replyToCallbackChat(
+                  "⚠️ Failed to process your selection. Please tap Done again to retry.",
+                );
+              } catch {
+                // Best-effort error notification
+              }
+            }
+            return;
+          }
+          // No selections accumulated — fall through to normal Done handling
+          // (user tapped Done without selecting anything)
+        }
       }
 
       const callbackThreadId = resolvedThreadId ?? dmThreadId;
