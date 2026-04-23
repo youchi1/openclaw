@@ -859,6 +859,16 @@ export async function onTimer(state: CronServiceState) {
     const dueJobs = await locked(state, async () => {
       await ensureLoaded(state, { forceReload: true, skipRecompute: true });
       const dueCheckNow = state.deps.nowMs();
+
+      // Run maintenance (including stuck runningAtMs cleanup) BEFORE collecting
+      // runnable jobs. Without this, jobs with stale runningAtMs markers are
+      // skipped by isRunnableJob and stay stuck until the next timer tick that
+      // happens to find zero due jobs (the only path that ran maintenance first).
+      recomputeNextRunsForMaintenance(state, {
+        recomputeExpired: false,
+        nowMs: dueCheckNow,
+      });
+
       const due = collectRunnableJobs(state, dueCheckNow);
 
       if (due.length === 0) {
@@ -876,8 +886,17 @@ export async function onTimer(state: CronServiceState) {
       }
 
       const now = state.deps.nowMs();
-      for (const job of due) {
-        job.state.runningAtMs = now;
+      const concurrencyLimit = resolveRunConcurrency(state);
+      for (let i = 0; i < due.length; i++) {
+        const job = due[i];
+        // Only mark jobs that will start immediately as running.
+        // Jobs beyond the concurrency limit will be marked when a worker
+        // picks them up (in runDueJob), avoiding premature runningAtMs
+        // that makes queued jobs appear "running" in the UI and blocks
+        // isRunnableJob from re-collecting them if the timer fires again.
+        if (i < concurrencyLimit) {
+          job.state.runningAtMs = now;
+        }
         job.state.lastError = undefined;
       }
       await persist(state);

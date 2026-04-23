@@ -36,6 +36,33 @@ import {
 import type { CronServiceState } from "./state.js";
 
 const STUCK_RUN_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Minimum stuck threshold when using adaptive detection based on
+ * lastDurationMs. Even very fast jobs get at least 10 minutes before
+ * being considered stuck, to avoid premature unsticking during transient
+ * slowdowns (provider latency, network issues, etc.).
+ */
+const MIN_ADAPTIVE_STUCK_MS = 15 * 60 * 1000;
+
+/**
+ * Multiplier applied to lastDurationMs for adaptive stuck detection.
+ * A job is considered stuck if it has been running for more than 3x its
+ * typical duration.
+ */
+const ADAPTIVE_STUCK_MULTIPLIER = 3;
+
+/**
+ * Resolve the stuck-run threshold for a job. Uses adaptive detection when
+ * the job has a known lastDurationMs, falling back to the flat 2h ceiling.
+ */
+function resolveStuckRunMs(job: CronJob): number {
+  const lastDuration = job.state.lastDurationMs;
+  if (typeof lastDuration === "number" && lastDuration > 0) {
+    return Math.max(lastDuration * ADAPTIVE_STUCK_MULTIPLIER, MIN_ADAPTIVE_STUCK_MS);
+  }
+  return STUCK_RUN_MS;
+}
 const STAGGER_OFFSET_CACHE_MAX = 4096;
 const staggerOffsetCache = new Map<string, number>();
 export const DEFAULT_ERROR_BACKOFF_SCHEDULE_MS = [
@@ -502,18 +529,25 @@ function normalizeJobTickState(params: { state: CronServiceState; job: CronJob; 
   }
 
   const runningAt = job.state.runningAtMs;
-  if (typeof runningAt === "number" && nowMs - runningAt > STUCK_RUN_MS) {
-    state.deps.log.warn(
-      { jobId: job.id, runningAtMs: runningAt },
-      "cron: clearing stuck running marker",
-    );
-    job.state.runningAtMs = undefined;
-    changed = true;
-    const nextRun = job.state.nextRunAtMs;
-    const lastRun = job.state.lastRunAtMs;
-    const alreadyExecutedSlot =
-      hasScheduledNextRunAtMs(nextRun) && isFiniteTimestamp(lastRun) && lastRun >= nextRun;
-    return { changed, skip: !alreadyExecutedSlot };
+  if (typeof runningAt === "number") {
+    // HC-008 part 3: adaptive stuck threshold based on the job's own history
+    // (max(lastDurationMs * 3, 15min) for jobs with run history; flat 2h fallback
+    // for first-run jobs). Keeps short-running jobs from staying stuck for hours
+    // while long-running jobs aren't aborted prematurely.
+    const stuckThresholdMs = resolveStuckRunMs(job);
+    if (nowMs - runningAt > stuckThresholdMs) {
+      state.deps.log.warn(
+        { jobId: job.id, runningAtMs: runningAt, stuckThresholdMs },
+        "cron: clearing stuck running marker",
+      );
+      job.state.runningAtMs = undefined;
+      changed = true;
+      const nextRun = job.state.nextRunAtMs;
+      const lastRun = job.state.lastRunAtMs;
+      const alreadyExecutedSlot =
+        hasScheduledNextRunAtMs(nextRun) && isFiniteTimestamp(lastRun) && lastRun >= nextRun;
+      return { changed, skip: !alreadyExecutedSlot };
+    }
   }
 
   return { changed, skip: false };
