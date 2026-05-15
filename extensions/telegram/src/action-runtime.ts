@@ -17,7 +17,13 @@ import {
   renderMessagePresentationFallbackText,
 } from "openclaw/plugin-sdk/interactive-runtime";
 import type { MessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/text-runtime";
 import { createTelegramActionGate, resolveTelegramPollActionGateState } from "./accounts.js";
+import { fitsTelegramCallbackData } from "./approval-callback-data.js";
+import type { TelegramButtonStyle, TelegramInlineButtons } from "./button-types.js";
 import { resolveTelegramInlineButtons } from "./button-types.js";
 import { notifyTelegramInboundTurnOutboundSuccess } from "./inbound-turn-delivery.js";
 import {
@@ -123,11 +129,91 @@ function readTelegramReplyToMessageId(params: Record<string, unknown>) {
   );
 }
 
+// HC-010: restore params.buttons reader (upstream removed this in the
+// interactive→presentation rename). The bootstrap "boss" docs and downstream
+// agents still call the message tool with a top-level buttons param shaped
+// `[[{ text, callback_data, style? }]]`; without this reader, those rows are
+// silently dropped and the Telegram message ships without an inline keyboard.
+const TELEGRAM_BUTTON_STYLES: readonly TelegramButtonStyle[] = ["danger", "success", "primary"];
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+
+type RawTelegramButton = {
+  callback_data?: unknown;
+  style?: unknown;
+  text?: unknown;
+};
+
+function coerceTelegramButtonsParam(raw: unknown): unknown {
+  if (typeof raw !== "string") {
+    return raw;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error("buttons must be an array of button rows (received malformed JSON string)");
+  }
+}
+
+export function readTelegramButtons(
+  params: Record<string, unknown>,
+): TelegramInlineButtons | undefined {
+  const raw = coerceTelegramButtonsParam(params.buttons);
+  if (raw == null) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error("buttons must be an array of button rows");
+  }
+  const rows = raw.map((row, rowIndex) => {
+    if (!Array.isArray(row)) {
+      throw new Error(`buttons[${rowIndex}] must be an array`);
+    }
+    return row.map((button, buttonIndex) => {
+      if (!button || typeof button !== "object") {
+        throw new Error(`buttons[${rowIndex}][${buttonIndex}] must be an object`);
+      }
+      const rawButton = button as RawTelegramButton;
+      const text = normalizeOptionalString(rawButton.text) ?? "";
+      const callbackData = normalizeOptionalString(rawButton.callback_data) ?? "";
+      if (!text || !callbackData) {
+        throw new Error(`buttons[${rowIndex}][${buttonIndex}] requires text and callback_data`);
+      }
+      if (!fitsTelegramCallbackData(callbackData)) {
+        throw new Error(
+          `buttons[${rowIndex}][${buttonIndex}] callback_data too long (max ${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes)`,
+        );
+      }
+      const styleRaw = rawButton.style;
+      const style = normalizeOptionalLowercaseString(styleRaw);
+      if (styleRaw !== undefined && !style) {
+        throw new Error(`buttons[${rowIndex}][${buttonIndex}] style must be string`);
+      }
+      if (style && !TELEGRAM_BUTTON_STYLES.includes(style as TelegramButtonStyle)) {
+        throw new Error(
+          `buttons[${rowIndex}][${buttonIndex}] style must be one of ${TELEGRAM_BUTTON_STYLES.join(", ")}`,
+        );
+      }
+      return {
+        text,
+        callback_data: callbackData,
+        ...(style ? { style: style as TelegramButtonStyle } : {}),
+      };
+    });
+  });
+  const filtered = rows.filter((row) => row.length > 0);
+  return filtered.length > 0 ? filtered : undefined;
+}
+
 function resolveTelegramButtonsFromParams(
   params: Record<string, unknown>,
   presentation = normalizeMessagePresentation(params.presentation),
 ) {
   return resolveTelegramInlineButtons({
+    buttons: readTelegramButtons(params),
     interactive: presentation ? presentationToInteractiveReply(presentation) : params.interactive,
   });
 }
