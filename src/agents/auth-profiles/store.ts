@@ -30,6 +30,7 @@ import {
 import {
   clearRuntimeAuthProfileStoreSnapshots as clearRuntimeAuthProfileStoreSnapshotsImpl,
   getRuntimeAuthProfileStoreSnapshot,
+  getRuntimeAuthProfileStoreSnapshotMtimes,
   hasRuntimeAuthProfileStoreSnapshot,
   replaceRuntimeAuthProfileStoreSnapshots as replaceRuntimeAuthProfileStoreSnapshotsImpl,
   setRuntimeAuthProfileStoreSnapshot,
@@ -118,9 +119,44 @@ function shouldUseMainOwnerForLocalOAuthCredential(params: {
   );
 }
 
+function refreshRuntimeAuthProfileStoreSnapshotIfStale(agentDir?: string): void {
+  // The in-memory runtime snapshot is treated as authoritative once set, but
+  // it can drift from disk in two scenarios: (1) a separate process writes to
+  // auth-profiles.json / auth-state.json (e.g. a probe or boss run), or
+  // (2) the same process calls saveAuthProfileStore for an agentDir whose
+  // snapshot has not been initialized — saveAuthProfileStore only refreshes
+  // the snapshot when one already exists. In both cases the snapshot keeps
+  // serving stale usage stats (notably disabledUntil) forever, so providers
+  // appear permanently disabled until the gateway restarts. Validate against
+  // disk mtimes and reload when they diverge.
+  if (!hasRuntimeAuthProfileStoreSnapshot(agentDir)) {
+    return;
+  }
+  const recorded = getRuntimeAuthProfileStoreSnapshotMtimes(agentDir);
+  if (!recorded) {
+    return;
+  }
+  const authPath = resolveAuthStorePath(agentDir);
+  const statePath = resolveAuthStatePath(agentDir);
+  const currentAuthMtimeMs = readAuthStoreMtimeMs(authPath);
+  const currentStateMtimeMs = readAuthStoreMtimeMs(statePath);
+  if (
+    recorded.authMtimeMs === currentAuthMtimeMs &&
+    recorded.stateMtimeMs === currentStateMtimeMs
+  ) {
+    return;
+  }
+  const fresh = loadAuthProfileStoreForAgent(agentDir, { readOnly: true });
+  setRuntimeAuthProfileStoreSnapshot(fresh, agentDir);
+}
+
 function resolveRuntimeAuthProfileStore(agentDir?: string): AuthProfileStore | null {
   const mainKey = resolveAuthStorePath(undefined);
   const requestedKey = resolveAuthStorePath(agentDir);
+  refreshRuntimeAuthProfileStoreSnapshotIfStale(undefined);
+  if (requestedKey !== mainKey) {
+    refreshRuntimeAuthProfileStoreSnapshotIfStale(agentDir);
+  }
   const mainStore = getRuntimeAuthProfileStoreSnapshot(undefined);
   const requestedStore = getRuntimeAuthProfileStoreSnapshot(agentDir);
 
